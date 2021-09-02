@@ -1,0 +1,465 @@
+####################### Routines to automate web scraping from various sites ###
+####################### M Mencuccini August 2018 ###
+
+## libraries (some may not be needed) ####
+#install.packages("phyndr", dependencies = T)
+library(grDevices)
+library(Matrix)
+library(lattice)
+library(graphics)
+library(aptg) # aptg: Automatic Phylogenetic Tree Generator to test if spp is in angiosperm tree; takes too long!!!
+library(Taxonstand) # step 1: clean up nomenclature
+library(taxonlookup) # step 2: look it up  <-- problems with the 3.5.1 R vesion
+library(phyndr) # step 3: swap species in tree for others with traits <-- problems with the 3.5.1 R vesion
+library(plyr)
+library(phytools)
+library(ape)
+library(caper)
+library(dplyr)
+library(stringr)
+library(data.table)
+library(rlang)
+library(xml2)
+library(rvest)
+library(httr)
+library(selectr)
+
+setwd("C:/Users/pablo/Desktop/Master/TFM/Analisis/Data")
+ht <- read.csv("HydraTRYlog.newdata.csv", header = T)
+
+missHmax <- with(ht, Species[which(is.na(Hmax))])
+length(missHmax)
+
+sterr <- function(x) sqrt(var(x,na.rm=TRUE)/length(na.omit(x)))                  # Standard error
+meanNA <- function(x) median(x, na.rm=TRUE)                                      # Median function
+uniqueNA <- function(x) if(length((x))>1) unique(x[!is.na(x)]) else {unique(x)}  # To remove repeated (unique remove duplicate elements/rows)
+uniqueclass <- function(x) if(length((x))>1) {                                   # when you have multiple cases
+  if(length(unique(x[!is.na(x)]))>1) {                                           # when you have multiple non-NA cases
+    paste(unique(x)[1],unique(x)[2], sep="_")
+  }   else if(length(unique(x[!is.na(x)]))==0)                                   # when there are only NAs
+    x <- NA     else{ unique(x[!is.na(x)]) }
+} else { x } # else
+
+
+# improved list of objects (lists object by size so largest ones can be deleted if not required)
+.ls.objects <- function (pos = 1, pattern, order.by,
+                         decreasing=FALSE, head=FALSE, n=5) {
+  napply <- function(names, fn) sapply(names, function(x)
+    fn(get(x, pos = pos)))
+  names <- ls(pos = pos, pattern = pattern)
+  obj.class <- napply(names, function(x) as.character(class(x))[1])
+  obj.mode <- napply(names, mode)
+  obj.type <- ifelse(is.na(obj.class), obj.mode, obj.class)
+  obj.size <- napply(names, object.size)
+  obj.dim <- t(napply(names, function(x)
+    as.numeric(dim(x))[1:2]))
+  vec <- is.na(obj.dim)[, 1] & (obj.type != "function")
+  obj.dim[vec, 1] <- napply(names, length)[vec]
+  out <- data.frame(obj.type, obj.size, obj.dim)
+  names(out) <- c("Type", "Size", "Rows", "Columns")
+  if (!missing(order.by))
+    out <- out[order(out[[order.by]], decreasing=decreasing), ]
+  if (head)
+    out <- head(out, n)
+  out
+}
+# shorthand
+lsos <- function(..., n=10) {
+  .ls.objects(..., order.by="Size", decreasing=TRUE, head=TRUE, n=n)
+}
+lsos()
+
+
+# SCRAPING WIKIPEDIA to get Growth.form and DecidEver classification ####
+
+test_wiki_error <- function (x) {
+  sapply(address, http_error, config(followlocation = 0L), USE.NAMES = F) }
+wiki_not_exist <- function(x) {
+  test1 <- (length(unique(str_match_all(html_text(html_nodes(pg, "body")),text)[[1]][,2]))>0)
+  return(test1)
+}
+wiki_extract <- function(x) {
+  tryCatch(
+    if(length(unique(str_match_all(html_text(html_nodes(pg, "body")),"(tree)")[[1]][,2]))>0)
+      
+    {text <- unique(str_match_all(html_text(html_nodes(pg, "body")),"(tree)")[[1]][,2]) 
+    if(grepl(text, pattern="tree", ignore.case= TRUE)) Growth.form[i] <- "tree"} else 
+      
+      if(length(unique(str_match_all(html_text(html_nodes(pg, "body")),"(shrub)")[[1]][,2]))>0)
+        
+      { text <- unique(str_match_all(html_text(html_nodes(pg, "body")),"(shrub)")[[1]][,2]) 
+      if(grepl(text, pattern="shrub", ignore.case= TRUE)) Growth.form[i] <- "shrub"}
+    else Growth.form[i] <- NA ) }
+wiki_extract_2 <- function(x) {
+  tryCatch(
+    if(length(unique(str_match_all(html_text(html_nodes(pg, "body")),"(evergreen)")[[1]][,2]))>0)
+      
+    {unique(str_match_all(html_text(html_nodes(pg, "body")),"(evergreen)")[[1]][,2]) } else 
+      
+      if(length(unique(str_match_all(html_text(html_nodes(pg, "body")),"(deciduous)")[[1]][,2]))>0)
+        
+      { unique(str_match_all(html_text(html_nodes(pg, "body")),"(deciduous)")[[1]][,2]) }
+    else Decid.Ever[i] <- NA ) }
+wiki_extract_3 <- function(x) {
+  tryCatch(
+    if(length(unique(str_match_all(html_text(html_nodes(pg, "body")),"(Angiosperms)")[[1]][,2]))>0)
+      
+    {unique(str_match_all(html_text(html_nodes(pg, "body")),"(Angiosperms)")[[1]][,2]) } else 
+      
+      if(length(unique(str_match_all(html_text(html_nodes(pg, "body")),"(Pinophyta)")[[1]][,2]))>0)
+        
+      { unique(str_match_all(html_text(html_nodes(pg, "body")),"(Pinophyta)")[[1]][,2]) } else
+        
+        if(length(unique(str_match_all(html_text(html_nodes(pg, "body")),"(Ginkgophyta)")[[1]][,2]))>0)
+          
+        { unique(str_match_all(html_text(html_nodes(pg, "body")),"(Ginkgophyta)")[[1]][,2]) }
+    
+    else angio.gymno[i] <- NA ) }
+
+# spp w/out Growth.form classification for which Hv and SLA are available
+missing.spp <- with(final.red, Species[is.na(Growth.form) & !is.na(Hv) & !is.na(SLA)])
+missing.spp <- sub(missing.spp, pattern=" ", replacement="_") # change name format
+
+Growth.form <- vector()
+for (i in 1:length(missing.spp)) {
+  address <- paste("https://en.wikipedia.org/wiki/", missing.spp[i], sep="")
+  if(!test_wiki_error(address)) { # avoids error is page is missing (normally Wikipedia has solution)
+    text <-  "(does not exist)"
+    pg <- read_html(address)
+    if(!wiki_not_exist(text)) { # hence wiki page exists
+      Growth.form[i] <- wiki_extract(pg)
+    } else {
+      Growth.form[i] <- NA # depending on where the function is called
+    }
+    on.exit(close(address)) # this closes connection to avoid warning "closing unused connection "
+  } else Growth.form[i] <- NA
+  print(i)
+}
+
+length(Growth.form[which(!is.na(Growth.form))]) # to check how many were recovered
+missing.spp <- sub(missing.spp, pattern="_", replacement=" ") # back to old format
+
+scraped_GrForm <- as.data.frame(cbind(missing.spp, Growth.form))
+scraped_GrForm$Growth.form <- as.character(scraped_GrForm$Growth.form)
+scraped_GrForm$Growth.form[which(scraped_GrForm$Growth.form=="tree")] <- "Tree"
+scraped_GrForm$Growth.form[which(scraped_GrForm$Growth.form=="shrub")] <- "Shrub"
+final.red$Growth.form <- as.character((final.red$Growth.form))
+
+
+# spp w/out Decid_Ever classification for which Hv and SLA are available
+missing.spp <- with(final.red, Species[is.na(Decid_Ever) & !is.na(Hv) & !is.na(SLA)])
+missing.spp <- sub(missing.spp, pattern=" ", replacement="_") # change name format
+
+
+Decid.Ever <- vector()
+for (i in 1:length(missing.spp)) {
+  address <- paste("https://en.wikipedia.org/wiki/", missing.spp[i], sep="")
+  if(!test_wiki_error(address)) { # avoids error is page is missing
+    text <-  "(does not exist)"
+    pg <- read_html(address)
+    if(!wiki_not_exist(text)) { # hence wiki page exists
+      Decid.Ever[i] <- wiki_extract_2(pg)
+    } else {
+      Decid.Ever[i] <- NA # depending on where the function is called
+    }
+    on.exit(close(address)) # this closes connection to avoid warning "closing unused connection "
+  } else Decid.Ever[i] <- NA
+  print(i)
+}
+
+length(Decid.Ever[which(!is.na(Decid.Ever))]) # to check how many were recovered
+missing.spp <- sub(missing.spp, pattern="_", replacement=" ") # back to old format
+
+scraped_DecEv <- as.data.frame(cbind(missing.spp, Decid.Ever))
+scraped_DecEv$Decid.Ever <- as.character(scraped_DecEv$Decid.Ever)
+scraped_DecEv$Decid.Ever[which(scraped_DecEv$Decid.Ever=="evergreen")] <- "E"
+scraped_DecEv$Decid.Ever[which(scraped_DecEv$Decid.Ever=="deciduous")] <- "D"
+final.red$Decid_Ever <- as.character((final.red$Decid_Ever))
+
+
+
+# SCRAPING WWW.EOL.ORG for species descriptions ####
+
+# scraping missing Growth.form
+missing.spp <- with(final.red, Species[is.na(Growth.form) & !is.na(Hv) & !is.na(SLA)])
+
+Growth.form <- vector()
+for (i in 1:length(missing.spp)) {
+  uastring <- "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36"
+  NameStr <- missing.spp[i]
+  session <- html_session("http://eol.org")
+  form <- html_form(session)[[1]]
+  form <- set_values(form, q=NameStr) # fills the form on main page
+  new_url <- submit_form(session,form) # gets session details with address of new page
+  
+  part.url <- strsplit(new_url$url, split = "overview")[[1]]
+  url <- paste(part.url, "details", sep="") # new URL with species details
+  
+  new_session <- html_session(url) # starts new session
+  
+  text <- new_session %>% html_nodes("#morphology+ .article .copy") %>% html_text
+  Growth.form[i] <- text[4] # extract Box with plant information
+}
+
+EoL_extract <- function(x) { # if spp is given as 'shrub or tree', it sets it to 'tree'
+  if(length(as.character(str_match_all(Growth.form[i],"tree")[[1]]))>0) { # first tests if tree
+    
+    unique(as.character(str_match_all(Growth.form[i],"tree")[[1]])) } else # if not, test if shrub
+      
+      if(length(as.character(str_match_all(Growth.form[i],"shrub")[[1]]))>0) {
+        
+        unique(as.character(str_match_all(Growth.form[i],"shrub")[[1]])) } else (NA)
+}
+
+Growth.form.EoL <- vector()
+for (i in 1:length(missing.spp)) {
+  if(!is.na(Growth.form[i])) { # this loop makes no scraping; just uses info from prior session
+    Growth.form.EoL[i] <- EoL_extract(Growth.form[i])} else
+      Growth.form.EoL[i] <- NA  
+} 
+
+length(Growth.form.EoL[which(!is.na(Growth.form.EoL))]) # to check how many were recovered
+
+scraped_GrForm_EoL <- as.data.frame(cbind(missing.spp, Growth.form.EoL))
+
+scraped_GrForm_EoL$Growth.form.EoL <- as.character(scraped_GrForm_EoL$Growth.form.EoL)
+scraped_GrForm_EoL$Growth.form.EoL[which(scraped_GrForm_EoL$Growth.form.EoL=="tree")] <- "Tree"
+scraped_GrForm_EoL$Growth.form.EoL[which(scraped_GrForm_EoL$Growth.form.EoL=="shrub")] <- "Shrub"
+final.red$Growth.form <- as.character((final.red$Growth.form))
+
+# scraping missing Decid_Ever
+missing.spp <- with(final.red, Species[is.na(Decid_Ever) & !is.na(Hv) & !is.na(SLA)])
+
+EoL_extract_2 <- function(x) {
+  if(length(as.character(str_match_all(Growth.form[i],"evergreen")[[1]]))>0) { # first tests if tree
+    
+    unique(as.character(str_match_all(Growth.form[i],"evergreen")[[1]])) } else # if not, test if shrub
+      
+      if(length(as.character(str_match_all(Growth.form[i],"deciduous")[[1]]))>0) {
+        
+        unique(as.character(str_match_all(Growth.form[i],"deciduous")[[1]])) } else (NA)
+}
+
+Decid.Ever.EoL <- vector()
+for (i in 1:length(missing.spp)) {
+  if(!is.na(Growth.form[i])) {
+    Decid.Ever.EoL[i] <- EoL_extract_2(Growth.form[i])} else # uses same output Growth.form from above
+      Decid.Ever.EoL[i] <- NA  
+} 
+
+length(Decid.Ever.EoL[which(!is.na(Decid.Ever.EoL))]) # to check how many were recovered
+
+scraped_DecEv_EoL <- as.data.frame(cbind(missing.spp, Decid.Ever.EoL))
+
+scraped_DecEv_EoL$Decid.Ever.EoL <- as.character(scraped_DecEv_EoL$Decid.Ever.EoL)
+scraped_DecEv_EoL$Decid.Ever.EoL[which(scraped_DecEv_EoL$Decid.Ever.EoL=="evergreen")] <- "E"
+scraped_DecEv_EoL$Decid.Ever.EoL[which(scraped_DecEv_EoL$Decid.Ever.EoL=="deciduous")] <- "D"
+final.red$Growth.form <- as.factor((final.red$Growth.form))
+final.red$Decid_Ever <- as.factor((final.red$Decid_Ever))
+final.red$TaxonGroup <- as.factor((final.red$TaxonGroup))
+final.red$woody_non.woody <- as.factor((final.red$woody_non.woody))
+final.red$Leaf_type <- as.factor((final.red$Leaf_type))
+final.red$Decid_Ever <- as.factor((final.red$Decid_Ever))
+# NA_angio include grasses and herbs but also lots of trees and shrubs
+
+
+# SCRAPING EFLORA of CHINA for species descriptions ####
+
+###################################### scraping missing Growth.form
+# load library
+numextract <- function(string){ 
+  str_extract_all(string, "\\-*\\d+\\.*\\d*")
+} 
+
+missing.spp <- with(final.red, Species[is.na(Growth.form) & !is.na(Hv) & !is.na(SLA)])
+
+FoC_extract <- function(x) { # if spp is given as 'shrub or tree', it sets it to 'tree'
+  if(any(grepl("Tree", text) | grepl("tree", text))) { # first tests if tree
+    
+    "Tree" } else # if not, test if shrub
+      
+      if(any(grepl("Shrub", text) | grepl("shrub", text))) {
+        
+        "Shrub" } else (NA)
+}
+
+Growth.form.FoC <- vector()
+for (i in 1:length(missing.spp)) {
+  uastring <- "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36"
+  NameStr <- missing.spp[i]
+  session <- html_session("http://www.efloras.org")
+  form <- html_form(session)[[1]]
+  form <- set_values(form, name_str=NameStr) # fills the form on main page
+  new_url <- submit_form(session,form) # gets session details with address of new page
+  
+  new_session <- html_session(new_url$url) # starts new session using spp. name
+  
+  # saves body of message and extracts record
+  text <- new_session %>% html_nodes("body") %>% html_text
+  
+  # processes string
+  numbers = numextract(text)[[1]]
+  sp_numb = numbers[nchar(numbers)>3][1] # eliminate some shortish vectors and looks at the first one
+  
+  #correct final url
+  new_url = paste("http://www.efloras.org/florataxon.aspx?flora_id=2&taxon_id=", sp_numb, sep = "")
+  
+  # new session at correct location in Flora of China  
+  new_session <- html_session(new_url) # starts new session using spp. name
+  
+  text <- new_session %>% html_nodes("body") %>% html_text
+  
+  if(!is.na(FoC_extract(text))) { # this loop makes no scraping; just uses info from prior session
+    Growth.form.FoC[i] <- FoC_extract(text) } else
+      Growth.form.FoC[i] <- NA  
+}
+
+length(Growth.form.FoC[which(!is.na(Growth.form.FoC))]) # to check how many were recovered
+
+scraped_GrForm_FoC <- as.data.frame(cbind(missing.spp, Growth.form.FoC))
+
+scraped_GrForm_FoC$Growth.form.FoC <- as.character(scraped_GrForm_FoC$Growth.form.FoC)
+scraped_GrForm_FoC$Growth.form.FoC[which(scraped_GrForm_FoC$Growth.form.FoC=="tree")] <- "Tree"
+scraped_GrForm_FoC$Growth.form.FoC[which(scraped_GrForm_FoC$Growth.form.FoC=="shrub")] <- "Shrub"
+final.red$Growth.form <- as.character((final.red$Growth.form))
+
+###################################### scraping missing Decid_Ever
+missing.spp <- with(final.red, Species[is.na(Decid_Ever) & !is.na(Hv) & !is.na(SLA)])
+
+FoC_extract_2 <- function(x) {
+  if(any(grepl("Evergreen", text) | grepl("evergreen", text))) { # first tests if E
+    
+    "E" } else # if not, test if deciduous
+      
+      if(any(grepl("Deciduous", text) | grepl("deciduous", text))) {
+        
+        "D" } else (NA)
+}
+
+Decid.Ever.FoC <- vector()
+for (i in 1:length(missing.spp)) {
+  uastring <- "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36"
+  NameStr <- missing.spp[i]
+  session <- html_session("http://www.efloras.org")
+  form <- html_form(session)[[1]]
+  form <- set_values(form, name_str=NameStr) # fills the form on main page
+  new_url <- submit_form(session,form) # gets session details with address of new page
+  
+  new_session <- html_session(new_url$url) # starts new session using spp. name
+  
+  # saves body of message and extracts record
+  text <- new_session %>% html_nodes("body") %>% html_text
+  
+  # processes string
+  numbers = numextract(text)[[1]]
+  sp_numb = numbers[nchar(numbers)>3][1] # eliminate some shortish vectors and looks at the first one
+  
+  #correct final url
+  new_url = paste("http://www.efloras.org/florataxon.aspx?flora_id=2&taxon_id=", sp_numb, sep = "")
+  
+  # new session at correct location in Flora of China  
+  new_session <- html_session(new_url) # starts new session using spp. name
+  
+  text <- new_session %>% html_nodes("body") %>% html_text
+  
+  if(!is.na(FoC_extract_2(text))) { # this loop makes no scraping; just uses info from prior session
+    
+    Decid.Ever.FoC[i] <- FoC_extract_2(text) } else
+      Decid.Ever.FoC[i] <- NA  
+}
+
+length(Decid.Ever.FoC[which(!is.na(Decid.Ever.FoC))]) # to check how many were recovered
+
+scraped_DecEv_FoC <- as.data.frame(cbind(missing.spp, Decid.Ever.FoC))
+
+scraped_DecEv_FoC$Decid.Ever.FoC <- as.character(scraped_DecEv_FoC$Decid.Ever.FoC)
+final.red$Growth.form <- as.factor((final.red$Growth.form))
+final.red$Decid_Ever <- as.factor((final.red$Decid_Ever))
+final.red$TaxonGroup <- as.factor((final.red$TaxonGroup))
+final.red$woody_non.woody <- as.factor((final.red$woody_non.woody))
+final.red$Leaf_type <- as.factor((final.red$Leaf_type))
+final.red$Decid_Ever <- as.factor((final.red$Decid_Ever))
+# NA_angio include grasses and herbs but also lots of trees and shrubs
+
+
+# SCRAPING THE FERNS - USEFUL TROPICAL PLANTS for species descriptions ####
+
+###################################### scraping missing Growth.form / Deciduousness / Hmax / family
+
+# hence all are potentially missing with this definition
+missing.spp <- with(fin, Species)
+FERNS <- data.frame(matrix(nrow=length(missing.spp), ncol=0))
+namevector <- c("Species", "faml", "phen", "gr_frm", "Hmax")
+FERNS[ , namevector] <- NA
+FERNS$Species <- missing.spp
+
+for (i in 1:length(missing.spp)) {
+  uastring <- "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36"
+  NameStr <- missing.spp[i]
+  genus = strsplit(missing.spp[i], split=" ")[[1]][1]
+  species = strsplit(missing.spp[i], split=" ")[[1]][2]
+  # creates url for httm session
+  url = paste("http://tropical.theferns.info/viewtropical.php?id=",genus,"+",species,sep="")
+  
+  session <- html_session(url) # starts new session using spp. name
+  if(session$response$status_code==500) next    # in cases where request rebounds to new page with spp list
+  if(session$response$status_code==403) next    # in cases where request rebounds to new page with spp list
+  
+  exist = session %>% html_nodes(css = ".PageBox")  %>% html_text
+  if(grepl("record for", exist[1])) next  # skip the loop if spp not in database
+  
+  # saves body of message and extracts record
+  # correct css found using installed gadget in google from  http://selectorgadget.com/
+  FERNS$faml[i] = session %>% html_nodes(css = ".family")  %>% html_text
+  for(j in 1:6) {                                    # skips line 1; repeat for children in table, as length varies for diff spp
+    
+    # extract first preliminary string
+    if((session %>% html_nodes(css = paste("tr:nth-child(",j,") td + td", sep=""))  %>% html_text)>0) { # line not empty
+      
+      text = session %>% html_nodes(css = paste("tr:nth-child(",j,") td + td", sep=""))  %>% html_text
+      
+      if(any(grepl("Endangered", text), grepl("Vulnerable", text), grepl("Data Deficient", text),
+             grepl("Least Concern", text), grepl("Near Threatened", text),
+             grepl("Yes", text))) next  # a few species follow in this trap
+      
+      if(!is.na(strsplit(text, split=" ")[[1]][2])) {       # requires two words (ie, must state deciduousness)
+        
+        # if first line is correct one (checks a few cases to avoid mistakes)
+        if(strsplit(text, split=" ")[[1]][1]=="Deciduous"| strsplit(text, split=" ")[[1]][1]=="Evergreen"|
+           strsplit(text, split=" ")[[1]][2]=="Tree"| strsplit(text, split=" ")[[1]][2]=="Shrub") {
+          text2 = strsplit(text, split=" ")[[1]][1]             # creates second temporary string
+          if(text2=="Deciduous") {
+            FERNS$phen[i] = "D"} else 
+              if (text2=="Semi Deciduous") {
+                FERNS$phen[i] = "D"} else {                    # too arbitrary to distinguish between the two
+                  FERNS$phen[i] = "E"}
+          FERNS$gr_frm[i] = strsplit(text, split=" ")[[1]][2]         # use first string to extract 2nd element
+        }     # no else here; nothing happens, moves to upper if statement
+      } else {
+        FERNS$gr_frm[i] = strsplit(text, split=" ")[[1]][1]         # use first string to extract 2nd element
+      }
+      
+      # extract second string one line below since first one is correct
+      text = session %>% html_nodes(css = paste("tr:nth-child(",j+1,") td + td", sep=""))  %>% html_text
+      FERNS$Hmax[i] = as.numeric(strsplit(text, split=" ")[[1]][1])
+      break    # exit the for j loop after filling the form
+    }          # there is no ELSE for this section, ie, moves to j+1 if line guess not correct
+    # there is no ELSE for this section, ie, moves to j+1 if line guess not correct
+    next      # skips to j+1 without exiting the for loop
+  }         # ends section when first line was guessed correctly 
+  print(i)
+}           # end of main loop across missing.spp
+
+fin$biome <- as.character((fin$biome))
+
+length(FERNS$faml[which(!is.na(FERNS$faml))]) # to check how many were recovered
+length(FERNS$phen[which(!is.na(FERNS$phen))]) # to check how many were recovered
+length(FERNS$gr_frm[which(!is.na(FERNS$gr_frm))]) # to check how many were recovered
+length(FERNS$Hmax[which(!is.na(FERNS$Hmax))]) # to check how many were recovered
+
+# only two levels left, Shrub and Tree
+fin <- droplevels(fin)
+
+
+
+
